@@ -1,0 +1,4 @@
+[[resources-example-items]]
+== Example API
+
+include::{snippets}/get-example/auto-section.adoc[]

@@ -1,0 +1,14 @@
+= Example Service APIs
+:doctype: book
+:page-layout!:
+:toc: right
+:stylesheet: github.css
+:stylesdir: style/
+
+:sectanchors:
+:sectlinks:
+:sectnums:
+:linkattrs:
+:source-highlighter: highlightjs
+
+include::example.adoc[]

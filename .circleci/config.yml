@@ -1,0 +1,201 @@
+version: 2.1
+
+orbs:
+  gradle: bizzabo/gradle@2.4.1
+  docker: bizzabo/docker@1.4.1
+  kubernetes: bizzabo/kubernetes@2.0.5
+  helm: bizzabo/helm@1.4.4
+  terraform: bizzabo/terraform@0.2.1
+#  runscope: bizzabo/runscope@0.2.0
+
+executors:
+  java:
+    docker:
+      - image: circleci/openjdk:11-stretch
+  java-machine:
+    machine:
+      image: ubuntu-1604:201903-01
+  js:
+    docker:
+      - image: circleci/node:lts-stretch
+
+jobs:
+  choose-cluster:
+    executor: js
+    parameters:
+      env:
+        type: string
+        default: dev
+    steps:
+      - run:
+          name: Determine Cluster
+          command: |
+            sudo apt-get install dnsutils
+            CLUSTER=$(dig bg-eks.<< parameters.env >>.bizzabo.com | grep CNAME | awk '{print $5}' |  awk -F. '{print $1}')
+            CLUSTER_NAME=eks-<< parameters.env >>-${CLUSTER}
+            echo "export CLUSTER=${CLUSTER}" >> $BASH_ENV
+            echo "export CLUSTER_NAME=${CLUSTER_NAME}" >> $BASH_ENV
+            echo ${CLUSTER} >> ./cluster.txt
+            echo ${CLUSTER_NAME} >> ./cluster_name.txt
+
+      - run:
+          name: Echo Cluster
+          command: |
+            echo ${CLUSTER}
+
+      - run:
+          name: Echo Cluster Name
+          command: |
+            echo ${CLUSTER_NAME}
+
+      - persist_to_workspace:
+          root: .
+          paths:
+            - ./cluster.txt
+            - ./cluster_name.txt
+
+  publish-rest-docs:
+    executor: java
+    steps:
+      - attach_workspace:
+          at: .
+      - store_artifacts:
+          path: build/asciidoc/html5/index.html
+          destination: api-docs.html
+
+workflows:
+  dev-flow:
+    jobs:
+
+      - choose-cluster:
+          name: Choose Cluster
+          filters:
+            branches:
+              ignore:
+                - master
+
+      - gradle/checkout_build_test:
+          executor: java-machine
+          name: Checkout Build Test
+          context: dev
+          additional-steps:
+            - store_test_results:
+                path: build/test-results
+            - persist_to_workspace:
+                root: .
+                paths:
+                  - Dockerfile
+                  - build/test-results
+                  - build/asciidoc/html5/index.html
+                  - build/libs/*.jar # does not resolve env_var
+          filters:
+            branches:
+              ignore:
+                - master
+
+      - publish-rest-docs:
+          name: Upload REST Docs
+          requires:
+            - Checkout Build Test
+
+      - kubernetes/create_configmap:
+          name: Create Configmap
+          service-config-file-path: src/main/resources/application.yaml
+          requires:
+            - Checkout Build Test
+
+      - helm/package_chart:
+          name: Package Chart
+          context: dev
+          requires:
+            - Create Configmap
+
+      - docker/build_publish:
+          name: Publish Project
+          context: dev
+          checkout: false
+          attach-workspace: true
+          repo: example/spring
+          requires:
+            - Checkout Build Test
+
+      - terraform/create_resources:
+          name: Create Resources (Terraform)
+          context: dev
+          helm-assembly-repo-url: git@github.com:bizzabo/helm-assembly.git
+          terraform-base-path: helm-assembly/terraform/bizzabo
+          requires:
+            - Publish Project
+            - Package Chart
+            - Choose Cluster
+
+      - kubernetes/create_od_deployment:
+          name: Deploy To Dev
+          context: dev
+          eks-cluster-name: $(</home/circleci/project/cluster_name.txt)
+          helm-assembly-repo-url: git@github.com:bizzabo/helm-assembly.git
+          helm-assembly-root-path: helm-assembly/charts/bizzabo
+          helm-values-path: helm-assembly/charts/bizzabo/values-qa-s3.yaml
+          helm-additional-params: --set tags.dare=true --set-string ${KUBERNETES_SERVICE_NAME}.image.tag=${CIRCLE_SHA1:0:7}
+          requires:
+            - Publish Project
+            - Package Chart
+            - Choose Cluster
+
+#      - runscope/run-tests:
+#          name: Run Integration Tests
+#          context: dev
+#          bucket-list: "Contacts,Edit,Emails,Event,Msg,Public API,Purchase,Registration flows,Registration,Ticket,UserProfileService,Agenda"
+#          api-url: https://${release}-api.ext.dev.bizzabo.com/api
+#          requires:
+#            - Deploy To Dev
+
+  master-flow:
+    jobs:
+      - kubernetes/create_configmap:
+          name: Create Configmap
+          service-config-file-path: src/main/resources/application.yaml
+          filters:
+            branches:
+              only:
+                - master
+
+      - helm/package_push_chart:
+          name: Publish Chart
+          context: dev
+          requires:
+            - Create Configmap
+
+      - choose-cluster:
+          name: Choose Cluster
+          filters:
+            branches:
+              only:
+                - master
+
+      - terraform/destroy_resources:
+          name: Delete Resources (Terraform)
+          context: dev
+          helm-assembly-repo-url: git@github.com:bizzabo/helm-assembly.git
+          terraform-base-path: helm-assembly/terraform/bizzabo
+          requires:
+            - Choose Cluster
+
+      - kubernetes/delete_od_deployment:
+          name: Delete Dev Deployment
+          context: dev
+          eks-cluster-name: $(</home/circleci/project/cluster_name.txt)
+          helm-assembly-repo-url: git@github.com:bizzabo/helm-assembly.git
+          helm-assembly-root-path: helm-assembly/charts/bizzabo
+          requires:
+            - Choose Cluster
+
+      - docker/promote_to_latest:
+          name: Promote Docker Image
+          context: dev
+          repo: example/spring
+          source-tag: $(git log | egrep '^commit ' | head -2| tail -1 | awk '{print substr($2,0,8)}')
+          filters:
+            branches:
+              only:
+                - master

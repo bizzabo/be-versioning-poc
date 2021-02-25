@@ -1,0 +1,19 @@
+replicaCount: 1
+maxUnavailable: 1
+
+image:
+  repository: example/spring
+  tag: latest
+  pullPolicy: Always
+
+service:
+  name: springexample
+  type: ClusterIP
+  externalPort: 80
+  internalPort: 8080
+
+activeProfile: dev
+
+configmap:
+  volumeMounts:
+    mountPath: /usr/local/lib/bizzabo/{{ .Values.service.name }}/config
